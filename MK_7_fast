@@ -1,0 +1,162 @@
+#!/bin/bash
+
+
+BamGenerator(){
+
+cd $target_dir/$family_number
+mkdir BamFolder$family_number
+cd BamFolder$family_number
+
+fastq_array=$source_dir/*$family_number*
+index=$source_dir/uni
+
+for element in $fastq_array;
+    do
+    sample_name=$(echo $element | cut -d "/" -f 4 | cut -d "." -f 1)
+    family_role=$(echo $sample_name | cut -d "_" -f 2)
+    bowtie2 --quiet -U $element -p 8 -x $index --rg-id "$family_role" --rg "SM:$family_role" | samtools view -Sb | samtools sort -o ./$sample_name.bam
+    samtools index ./$sample_name.bam
+    echo "$family_role.bam done!"
+done
+echo "BAM files correctly created!"
+}
+
+QC(){
+
+cd $target_dir/$family_number
+mkdir QualityCheck$family_number
+cd QualityCheck$family_number
+
+fastq_array=$source_dir/*$family_number*
+bam_array=$target_dir/$family_number/BamFolder$family_number/*.bam
+bed_file=$source_dir/exons16Padded_sorted.bed
+
+for element in $fastq_array;
+    do
+    fastqc -q -o $target_dir/$family_number/QualityCheck$family_number $element
+    done
+
+rm *.html
+echo "FASTQC reports correctly created!"
+
+for element in $bam_array;
+    do
+    actual_name=$(basename "$element" .bam)
+    qualimap bamqc -bam $element -gff $bed_file -outdir $target_dir/$family_number/QualityCheck$family_number/$actual_name &> $actual_name"_output"
+    done
+echo "BAMQC reports correctly created!"
+
+multiqc ./
+mv multiqc_report.html multiqc_report$family_number.html
+}
+
+CreateBedGraph(){
+
+cd $target_dir/$family_number
+mkdir BedGraph$family_number
+cd BedGraph$family_number
+
+bam_array=$target_dir/$family_number/BamFolder$family_number/*.bam
+
+for element in $bam_array;
+    do
+    actual_name=$(basename "$element" .bam)
+    name=$(echo $actual_name | cut -d "_" -f 2)
+    bedtools genomecov -ibam $element -bg -trackline -trackopts "name=$name" -max 100 > "$name$family_number"Cov.bg
+    done
+echo "BG files correctly created!"
+}
+
+VariantCalling(){
+
+cd $target_dir/$family_number
+mkdir VariantCall$family_number
+cd BamFolder$family_number
+
+bed_file=$source_dir/exons16Padded_sorted.bed
+reference_genome=$source_dir/universe.fasta
+
+freebayes -f $reference_genome -m 20 -C 5 -Q 10 --min-coverage 10 ./"case"$family_number"_child.bam" ./"case"$family_number"_father.bam" ./"case"$family_number"_mother.bam" > $target_dir/$family_number/VariantCall$family_number/"case"$family_number".vcf"
+echo "VCF file correctly created!"
+
+cd $target_dir/$family_number/VariantCall$family_number
+
+grep "#" "case"$family_number.vcf > ref$family_number.vcf
+
+case $disease_type in
+AR) grep -E "0/1.*0/1.*1/1" "case"$family_number.vcf >> ref$family_number.vcf;;
+AD) grep -E "0/0.*0/0.*0/1|0/0.*0/0.*0/2" "case"$family_number.vcf >> ref$family_number.vcf;;
+esac
+echo "Filtering for correct model patterns completed!"
+
+grep "#" "case"$family_number.vcf > ref_int$family_number.vcf
+
+bedtools intersect -a ref$family_number.vcf -b $bed_file -u >> ref_int$family_number.vcf
+echo "Intersecting step completed!"
+
+bcftools query -l ref_int$family_number.vcf | sort > samples$family_number.txt
+bcftools view -S samples$family_number.txt ref_int$family_number.vcf > ref_int$family_number.sorted.vcf
+echo "Sorting step completed!"
+
+rm "case"$family_number.vcf
+rm samples$family_number.txt
+rm ref$family_number.vcf
+}
+
+input_family="$1 $2 $3 $4 $5 $6 $7 $8 $9 ${10} ${11}"
+
+if [ $# -eq 0 ]
+then
+    echo "An ERROR occurred"
+    echo "Remember to insert at least one argument when excecuting the script!"
+    exit 1
+fi
+
+if [ $1 == "-h" ] || [ $1 == "--help" ]
+then
+    cat /home/BCG_2024_*/*/*/CompleteScript/README.txt
+    exit 0
+fi
+
+echo -n "Insert your target directory: "
+read target_dir
+source_dir=/home/BCG2024_genomics_exam
+
+if [ -d $target_dir ]
+then
+    echo "The program will be using $target_dir as your destination directory"
+else
+    mkdir $target_dir
+    echo "The program created $target_dir, which will be used as your destination directory"
+fi
+
+for family in $input_family;
+    do
+    if [ $family == "STOP" ]
+    then
+        echo "Program correctly interrupted!"
+        exit 0
+    else
+        family_number=$(echo $family | cut -d "_" -f 1)
+        disease_type=$(echo $family | cut -d "_" -f 2)
+	if [ $disease_type == "AR" ] || [ $disease_type == "AD" ]
+	then
+            echo "Currently processing family $family_number, looking for $disease_type diseases"
+            cd $target_dir
+            mkdir $family_number
+
+            BamGenerator
+            QC
+            CreateBedGraph
+            VariantCalling
+        else
+            echo "An ERROR occurred!"
+            echo "Maybe you wrongly inserted the disease models: You MUST type in AD or AR"
+            echo "Perhaps you forgot to insert the STOP argument, when needed!"
+	    exit 1
+	fi
+    fi
+    done
+
+echo "Program correctly excecuted!"
+exit 0
